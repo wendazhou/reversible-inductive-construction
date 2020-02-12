@@ -23,26 +23,29 @@ namespace py = boost::python;
 
 namespace {
 
-void copy_edit_mol(RDKit::ROMol const &mol, RDKit::RWMol& result) {
+RDKit::ROMol* copy_edit_mol(RDKit::ROMol const& mol) {
+    RDKit::RWMol* result = new RDKit::RWMol();
+
     for (auto it = mol.beginAtoms(), e = mol.endAtoms(); it != e; ++it) {
         auto atom = new RDKit::Atom((*it)->getAtomicNum());
         atom->setFormalCharge((*it)->getFormalCharge());
 
-        result.addAtom(atom, true, true);
+        result->addAtom(atom, true, true);
     }
 
     for (auto it = mol.beginBonds(), e = mol.endBonds(); it != e; ++it) {
         auto a1_idx = (*it)->getBeginAtomIdx();
         auto a2_idx = (*it)->getEndAtomIdx();
-        result.addBond(a1_idx, a2_idx, (*it)->getBondType());
+        result->addBond(a1_idx, a2_idx, (*it)->getBondType());
     }
 
-    result.updatePropertyCache();
+    result->updatePropertyCache();
+    return result;
 }
 
 } // namespace
 
 BOOST_PYTHON_MODULE(molecule_edit) {
-    py::def("copy_edit_mol_impl", &copy_edit_mol, py::arg("mol"), py::arg("target"));
+    py::def("copy_edit_mol", &copy_edit_mol, py::arg("mol"), py::return_value_policy<py::manage_new_object>());
 }
 

@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 
+import setuptools
 from setuptools import setup, find_packages, Extension
 
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
@@ -14,9 +15,7 @@ if conda_prefix is not None and conda_prefix != '':
 else:
     rdkit_include_dirs = []
 
-extensions = [
-    #CMakeExtension("genric.genric_extensions", download_and_patch_rdkit),
-    #CUDAExtension("genric.torch_extensions", source_dir="cpp/torch/"),
+torch_extensions = [
     CUDAExtension("genric.torch_extensions",
         sources=[os.path.join('cpp/torch/', fn) for fn in [
             'module.cpp',
@@ -33,21 +32,37 @@ extensions = [
             'cxx': ['-g', '-DAT_PARALLEL_OPENMP', '-fopenmp'],
             'nvcc': []
         }),
-    Extension("genric.genric_extensions._molecule_edit",
+]
+
+extensions = [
+    Extension("genric.genric_extensions.molecule_edit",
               sources=['cpp/molecule_edit.cpp'],
               include_dirs=rdkit_include_dirs,
-              libraries=['boost_python', 'RDKitGraphMol']),
+              libraries=['boost_python', 'RDKitGraphMol', 'RDKitRDBoost']),
     Extension("genric.genric_extensions.molecule_representation",
               sources=['cpp/molecule_representation.cpp'],
               include_dirs=rdkit_include_dirs,
-              libraries=['boost_python', 'RDKitGraphMol'])
+              libraries=['boost_python', 'RDKitGraphMol', 'RDKitRDBoost'])
 ]
+
+class MyBuild(BuildExtension):
+    def __init__(self, *args, **kwargs):
+        super(MyBuild, self).__init__(*args, **kwargs)
+
+    def build_extensions(self):
+        self.extensions = torch_extensions
+        super(MyBuild, self).build_extensions()
+
+        self.extensions = extensions
+        setuptools.command.build_ext.build_ext.build_extensions(self)
+
+
 
 setup(
     name="induc-gen",
     packages=find_packages(),
-    ext_modules=extensions,
+    ext_modules=extensions + torch_extensions,
     cmdclass={
-        'build_ext': BuildExtension
+        'build_ext': MyBuild,
     }
 )

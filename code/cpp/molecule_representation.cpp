@@ -46,12 +46,6 @@ BufferHolder get_buffer(PyObject* obj, int additional_flags = 0) {
 bool check_format_i32(const char* format) { return format && (format[0] == 'i' || format[0] == 'l'); }
 bool check_format_f32(const char* format) { return format && (format[0] == 'f'); }
 
-bool BondIsInRing(const RDKit::Bond *bond) {
-    if (!bond->getOwningMol().getRingInfo()->isInitialized()) {
-        RDKit::MolOps::findSSSR(bond->getOwningMol());
-    }
-    return bond->getOwningMol().getRingInfo()->numBondRings(bond->getIdx()) != 0;
-}
 
 int GetAtomSymbolOneHotIndex(int atomic_num) {
     switch (atomic_num) {
@@ -138,7 +132,7 @@ template <typename T> void atom_features(T *data, RDKit::Atom const &atom) {
     data[offset] = atom.getIsAromatic() ? 1 : 0;
 };
 
-void fill_atom_features(PyObject* view, RDKit::ROMol &mol) {
+void fill_atom_features(PyObject* view, RDKit::ROMol const& mol) {
     auto info = get_buffer(view, PyBUF_WRITABLE);
 
     if (info.ndim != 2) {
@@ -188,20 +182,20 @@ template <typename T> void bond_type_feature(T *data, RDKit::Bond::BondType type
 }
 
 // writes the bond features to the given data array.
-template <typename T> void bond_features(T *data, RDKit::Bond const &bond) {
+template <typename T> void bond_features(T *data, RDKit::Bond const &bond, RDKit::ROMol const& mol) {
     int offset = 0;
 
     bond_type_feature(data + offset, bond.getBondType());
     offset += 4;
 
-    data[offset] = BondIsInRing(&bond);
+    data[offset] = mol.getRingInfo()->numBondRings(bond.getIdx()) != 0;
     offset += 1;
 
     data[offset + std::min(static_cast<int>(bond.getStereo()), 5)] = 1;
 }
 
 
-void fill_bond_features(PyObject* view, RDKit::ROMol &mol) {
+void fill_bond_features(PyObject* view, RDKit::ROMol const* mol) {
     auto buffer = get_buffer(view, PyBUF_WRITABLE);
 
     if (!PyBuffer_IsContiguous(&buffer, 'C')) {
@@ -213,7 +207,7 @@ void fill_bond_features(PyObject* view, RDKit::ROMol &mol) {
     }
 
     if (buffer.shape[1] < AtomFeatureDimension + BondFeatureDimension ||
-        buffer.shape[0] < 2 * mol.getNumBonds()) {
+        buffer.shape[0] < 2 * mol->getNumBonds()) {
         throw std::runtime_error("Buffer too small to fit specified molecule!");
     }
 
@@ -227,13 +221,21 @@ void fill_bond_features(PyObject* view, RDKit::ROMol &mol) {
         auto strides_i = buffer.strides[0] / buffer.itemsize;
         auto ptr = static_cast<float *>(buffer.buf);
 
-        for (auto it = mol.beginBonds(), e = mol.endBonds(); it != e; ++i, ++it) {
+        if (mol->getRingInfo() == nullptr) {
+            throw std::runtime_error("molecule does not have ring info!");
+        }
+
+        if (mol->getRingInfo()->isInitialized()) {
+            RDKit::MolOps::findSSSR(*mol);
+        }
+
+        for (auto it = mol->beginBonds(), e = mol->endBonds(); it != e; ++i, ++it) {
             // fill in bonds in both directions.
             atom_features(ptr + (2 * i) * strides_i, *(*it)->getBeginAtom());
-            bond_features(ptr + (2 * i) * strides_i + AtomFeatureDimension, **it);
+            bond_features(ptr + (2 * i) * strides_i + AtomFeatureDimension, **it, *mol);
 
             atom_features(ptr + (2 * i + 1) * strides_i, *(*it)->getEndAtom());
-            bond_features(ptr + (2 * i + 1) * strides_i + AtomFeatureDimension, **it);
+            bond_features(ptr + (2 * i + 1) * strides_i + AtomFeatureDimension, **it, *mol);
         }
     }
 }

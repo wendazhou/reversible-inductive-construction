@@ -166,6 +166,9 @@ def test_mol2graph_single_rings():
 
 def test_combine_graphs_bond_rings():
     mol = me.get_mol('O=C(Cn1nc(C(=O)[O-])c2ccccc2c1=O)Nc1ccc2c(c1)C(=O)c1ccccc1C2=O')
+
+    print(mol.GetRingInfo())
+
     result = mr.mol2graph_single(mol, include_leaves=True, include_rings=True)
     result = mr.combine_mol_graph([result])
 
