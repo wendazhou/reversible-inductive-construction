@@ -25,7 +25,7 @@ def test_repeat_out_python():
 
     x = torch.tensor(x)
     output = x.new_empty(expected.shape)
-    result = _repeat_interleave.repeat_interleave_out_native(torch.tensor(x), torch.tensor(times), 0, output)
+    result = _repeat_interleave.repeat_interleave_out_native(x, torch.tensor(times), 0, output)
 
     assert np.allclose(result.numpy(), expected)
 

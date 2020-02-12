@@ -37,7 +37,7 @@ def normalize_values_scopes(values, scopes, batch_size=None, device=None):
         if values[i].dim() > 1:
             factor = np.prod(values[i].shape[1:])
             values[i] = values[i].view(-1)
-            scopes[i] = scopes[i] * factor
+            scopes[i] = scopes[i] * int(factor)
 
     return values, scopes
 

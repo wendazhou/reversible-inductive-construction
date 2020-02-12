@@ -1,47 +1,48 @@
-#include "module.h"
-
 #include <algorithm>
 #include <iterator>
+
+#include <RDBoost/python.h>
+#include <RDBoost/Wrap.h>
+
+#include <GraphMol/RDKitBase.h>
+#include <GraphMol/RDKitQueries.h>
+#include <GraphMol/MonomerInfo.h>
 
 #include <GraphMol/AtomIterators.h>
 #include <GraphMol/BondIterators.h>
 #include <GraphMol/GraphMol.h>
 #include <GraphMol/MolOps.h>
-#include <pybind11/pybind11.h>
 
-#include <pybind11/numpy.h>
+#include <boost/python.hpp>
 
 #include <vector>
 #include <set>
 
-namespace py = pybind11;
+
+namespace py = boost::python;
 
 namespace {
 
-std::shared_ptr<RDKit::RWMol> copy_edit_mol(RDKit::ROMol &mol) {
-    auto result = std::make_shared<RDKit::RWMol>();
-
+void copy_edit_mol(RDKit::ROMol const &mol, RDKit::RWMol& result) {
     for (auto it = mol.beginAtoms(), e = mol.endAtoms(); it != e; ++it) {
         auto atom = new RDKit::Atom((*it)->getAtomicNum());
         atom->setFormalCharge((*it)->getFormalCharge());
 
-        result->addAtom(atom, true, true);
+        result.addAtom(atom, true, true);
     }
 
     for (auto it = mol.beginBonds(), e = mol.endBonds(); it != e; ++it) {
         auto a1_idx = (*it)->getBeginAtomIdx();
         auto a2_idx = (*it)->getEndAtomIdx();
-        result->addBond(a1_idx, a2_idx, (*it)->getBondType());
+        result.addBond(a1_idx, a2_idx, (*it)->getBondType());
     }
 
-    result->updatePropertyCache();
-    return result;
+    result.updatePropertyCache();
 }
 
 } // namespace
 
-
-void genric::register_molecule_edit(py::module &m) {
-    m.doc() = "Helper functions for molecule edit functionality.";
-    m.def("copy_edit_mol", &copy_edit_mol, py::call_guard<py::gil_scoped_release>());
+BOOST_PYTHON_MODULE(molecule_edit) {
+    py::def("copy_edit_mol_impl", &copy_edit_mol, py::arg("mol"), py::arg("target"));
 }
+

@@ -1,24 +1,57 @@
-#include "module.h"
-#include "wrap/wrappers.h"
-
-#include <pybind11/buffer_info.h>
-#include <pybind11/pybind11.h>
+#include <RDBoost/python.h>
+#include <RDBoost/Wrap.h>
 
 #include <GraphMol/Atom.h>
 #include <GraphMol/AtomIterators.h>
 #include <GraphMol/Bond.h>
 #include <GraphMol/BondIterators.h>
 #include <GraphMol/GraphMol.h>
+#include <GraphMol/MolOps.h>
 #include <cstdint>
 #include <exception>
 
-namespace py = pybind11;
+#include <boost/python.hpp>
+
+namespace py = boost::python;
 
 namespace {
 
 const int NumAtomSymbols = 23;
 const int AtomFeatureDimension = NumAtomSymbols + 6 + 5 + 4 + 1;
 const int BondFeatureDimension = 5 + 6;
+
+
+class BufferHolder : public Py_buffer {
+public:
+    BufferHolder(PyObject* obj, int additional_flags = 0) {
+        if(PyObject_CheckBuffer(obj) != 1) {
+            throw std::runtime_error("object must support buffer protocol");
+        }
+
+        if(PyObject_GetBuffer(obj, this, PyBUF_STRIDES | PyBUF_FORMAT | additional_flags) != 0) {
+            throw std::runtime_error("object does not support strided buffer with given requirements");
+        }
+    }
+
+    ~BufferHolder() {
+        PyBuffer_Release(this);
+    }
+};
+
+
+BufferHolder get_buffer(PyObject* obj, int additional_flags = 0) {
+    return BufferHolder(obj, additional_flags);
+}
+
+bool check_format_i32(const char* format) { return format && (format[0] == 'i' || format[0] == 'l'); }
+bool check_format_f32(const char* format) { return format && (format[0] == 'f'); }
+
+bool BondIsInRing(const RDKit::Bond *bond) {
+    if (!bond->getOwningMol().getRingInfo()->isInitialized()) {
+        RDKit::MolOps::findSSSR(bond->getOwningMol());
+    }
+    return bond->getOwningMol().getRingInfo()->numBondRings(bond->getIdx()) != 0;
+}
 
 int GetAtomSymbolOneHotIndex(int atomic_num) {
     switch (atomic_num) {
@@ -105,8 +138,8 @@ template <typename T> void atom_features(T *data, RDKit::Atom const &atom) {
     data[offset] = atom.getIsAromatic() ? 1 : 0;
 };
 
-void fill_atom_features(py::buffer &view, RDKit::ROMol &mol) {
-    auto info = view.request(true);
+void fill_atom_features(PyObject* view, RDKit::ROMol &mol) {
+    auto info = get_buffer(view, PyBUF_WRITABLE);
 
     if (info.ndim != 2) {
         throw std::runtime_error("Buffer must be 2-dimensional");
@@ -120,12 +153,12 @@ void fill_atom_features(py::buffer &view, RDKit::ROMol &mol) {
         throw std::runtime_error("Buffer must have C-contiguous layout");
     }
 
-    if (info.format != py::format_descriptor<float>::format()) {
+    if (!check_format_f32(info.format)) {
         throw std::runtime_error("Buffer must be of float type");
     }
 
     auto strides_i = info.strides[0] / info.itemsize;
-    auto ptr = static_cast<float *>(info.ptr);
+    auto ptr = static_cast<float *>(info.buf);
 
     int i = 0;
 
@@ -161,39 +194,38 @@ template <typename T> void bond_features(T *data, RDKit::Bond const &bond) {
     bond_type_feature(data + offset, bond.getBondType());
     offset += 4;
 
-    data[offset] = genric::BondIsInRing(&bond);
+    data[offset] = BondIsInRing(&bond);
     offset += 1;
 
     data[offset + std::min(static_cast<int>(bond.getStereo()), 5)] = 1;
 }
 
-void fill_bond_features(py::buffer &view, RDKit::ROMol &mol) {
-    auto info = view.request(true);
 
-    if (info.ndim != 2) {
+void fill_bond_features(PyObject* view, RDKit::ROMol &mol) {
+    auto buffer = get_buffer(view, PyBUF_WRITABLE);
+
+    if (!PyBuffer_IsContiguous(&buffer, 'C')) {
+        throw std::runtime_error("Buffer most be C-contiguous");
+    }
+
+    if (buffer.ndim != 2) {
         throw std::runtime_error("Buffer must be 2-dimensional");
     }
 
-    if (info.shape[1] < AtomFeatureDimension + BondFeatureDimension ||
-        info.shape[0] < 2 * mol.getNumBonds()) {
+    if (buffer.shape[1] < AtomFeatureDimension + BondFeatureDimension ||
+        buffer.shape[0] < 2 * mol.getNumBonds()) {
         throw std::runtime_error("Buffer too small to fit specified molecule!");
     }
 
-    if (info.strides[1] != info.itemsize) {
-        throw std::runtime_error("Buffer must have C-contiguous layout");
-    }
-
-    if (info.format != py::format_descriptor<float>::format()) {
+    if (!buffer.format || *buffer.format != 'f') {
         throw std::runtime_error("Buffer must be of float type");
     }
 
     {
-        py::gil_scoped_release release;
-
         int i = 0;
 
-        auto strides_i = info.strides[0] / info.itemsize;
-        auto ptr = static_cast<float *>(info.ptr);
+        auto strides_i = buffer.strides[0] / buffer.itemsize;
+        auto ptr = static_cast<float *>(buffer.buf);
 
         for (auto it = mol.beginBonds(), e = mol.endBonds(); it != e; ++i, ++it) {
             // fill in bonds in both directions.
@@ -206,27 +238,25 @@ void fill_bond_features(py::buffer &view, RDKit::ROMol &mol) {
     }
 }
 
-bool check_format_i32(std::string const &format) { return format == "i" || format == "l"; }
 
-void fill_atom_bond_list(py::buffer &view, RDKit::ROMol &mol, int max_neighbours) {
-    auto info = view.request(true);
+void fill_atom_bond_list(PyObject* view, RDKit::ROMol &mol, int max_neighbours) {
+    auto buffer = get_buffer(view, PyBUF_WRITABLE);
 
-    if (!check_format_i32(info.format) || info.ndim != 2) {
+    if (!check_format_i32(buffer.format) || buffer.ndim != 2) {
         throw std::runtime_error("Incompatible buffer format!");
     }
 
-    if (info.shape[0] < mol.getNumAtoms() || info.shape[1] < max_neighbours) {
+    if (buffer.shape[0] < mol.getNumAtoms() || buffer.shape[1] < max_neighbours) {
         throw std::runtime_error("Buffer too small to fit specified molecule!");
     }
 
     {
         // release GIL once we acquire buffer pointer
-        py::gil_scoped_release release;
 
         int i = 0;
-        auto view_ptr = static_cast<std::int32_t *>(info.ptr);
-        auto strides_i = info.strides[0] / info.itemsize;
-        auto strides_j = info.strides[1] / info.itemsize;
+        auto view_ptr = static_cast<std::int32_t *>(buffer.buf);
+        auto strides_i = buffer.strides[0] / buffer.itemsize;
+        auto strides_j = buffer.strides[1] / buffer.itemsize;
 
         for (auto it1 = mol.beginAtoms(), e1 = mol.endAtoms(); it1 != e1; ++i, ++it1) {
             RDKit::ROMol::OEDGE_ITER bond_begin, bond_end;
@@ -242,26 +272,25 @@ void fill_atom_bond_list(py::buffer &view, RDKit::ROMol &mol, int max_neighbours
     }
 }
 
-void fill_bond_incidence_list(py::buffer &view, RDKit::ROMol &mol, int max_neighbours) {
-    auto info = view.request(true);
+void fill_bond_incidence_list(PyObject* view, RDKit::ROMol &mol, int max_neighbours) {
+    auto buffer = get_buffer(view, PyBUF_WRITABLE);
 
-    if (!check_format_i32(info.format) || info.ndim != 2) {
+    if (!check_format_i32(buffer.format) || buffer.ndim != 2) {
         throw std::runtime_error("Incompatible buffer format!");
     }
 
-    if (info.shape[0] < 2 * mol.getNumBonds() + 1 || info.shape[1] < max_neighbours) {
+    if (buffer.shape[0] < 2 * mol.getNumBonds() + 1 || buffer.shape[1] < max_neighbours) {
         throw std::runtime_error("Buffer too small to fit specified molecule!");
     }
 
-    auto view_ptr = static_cast<std::int32_t *>(info.ptr);
-    auto strides_i = info.strides[0] / info.itemsize;
-    auto strides_j = info.strides[1] / info.itemsize;
+    auto view_ptr = static_cast<std::int32_t *>(buffer.buf);
+    auto strides_i = buffer.strides[0] / buffer.itemsize;
+    auto strides_j = buffer.strides[1] / buffer.itemsize;
 
     int i = 0;
 
     {
         // release GIL once we acquire buffer pointer
-        py::gil_scoped_release release;
 
         for (auto it1 = mol.beginBonds(), e1 = mol.endBonds(); it1 != e1; ++i, ++it1) {
             auto bond = *it1;
@@ -288,14 +317,13 @@ void fill_bond_incidence_list(py::buffer &view, RDKit::ROMol &mol, int max_neigh
     }
 }
 
-void fill_atom_bond_list_sparse(py::buffer values, py::buffer index, const RDKit::ROMol &mol) {
-    auto info_values = values.request(true);
-    auto info_index = index.request(true);
+void fill_atom_bond_list_sparse(PyObject* values, PyObject* index, const RDKit::ROMol &mol) {
+    auto info_values = get_buffer(values, PyBUF_WRITABLE);
+    auto info_index = get_buffer(index, PyBUF_WRITABLE);
 
     auto num_elements = mol.getNumBonds() * 2;
 
-    if ((info_values.format != py::format_descriptor<float>::format()) ||
-        (info_values.shape[0] != num_elements)) {
+    if (!check_format_f32(info_values.format) || (info_values.shape[0] != num_elements)) {
         throw std::runtime_error(
             "Invalid values buffer. Must be of type float and length 2 * number of bonds.");
     }
@@ -309,16 +337,14 @@ void fill_atom_bond_list_sparse(py::buffer values, py::buffer index, const RDKit
             "Invalid shape for index buffer. Must be of size 2 x (2 * num_bonds).");
     }
 
-    auto values_ptr = static_cast<float *>(info_values.ptr);
+    auto values_ptr = static_cast<float *>(info_values.buf);
     auto values_stride = info_values.strides[0] / info_values.itemsize;
 
-    auto index_ptr = static_cast<int32_t *>(info_index.ptr);
+    auto index_ptr = static_cast<int32_t *>(info_index.buf);
     auto index_offset_0 = info_index.strides[0] / info_index.itemsize;
     auto index_stride = info_index.strides[1] / info_index.itemsize;
 
     {
-        py::gil_scoped_release release_gil;
-
         int i = 0;
         int current_index = 0;
 
@@ -334,7 +360,7 @@ void fill_atom_bond_list_sparse(py::buffer values, py::buffer index, const RDKit
                 index_ptr[current_index * index_stride] = i;
                 index_ptr[index_offset_0 + current_index * index_stride] =
                     2 * bond->getIdx() + (bond->getBeginAtomIdx() == (*it1)->getIdx());
-                values_ptr[current_index] = value;
+                values_ptr[current_index * values_stride] = value;
                 current_index += 1;
             }
         }
@@ -352,12 +378,11 @@ int get_edge_incidence_size(RDKit::ROMol const &mol) {
     return result;
 }
 
-void fill_bond_incidence_list_sparse(py::buffer values, py::buffer index,
-                                     const RDKit::ROMol &mol) {
-    auto info_values = values.request(true);
-    auto info_index = index.request(true);
+void fill_bond_incidence_list_sparse(PyObject* values, PyObject* index, const RDKit::ROMol &mol) {
+    auto info_values = get_buffer(values, PyBUF_WRITABLE);
+    auto info_index = get_buffer(index, PyBUF_WRITABLE);
 
-    if ((info_values.format != py::format_descriptor<float>::format()) || info_values.ndim != 1) {
+    if (!check_format_f32(info_values.format) || info_values.ndim != 1) {
         throw std::runtime_error("Values must be one-dimensional floating-point array.");
     }
 
@@ -365,16 +390,15 @@ void fill_bond_incidence_list_sparse(py::buffer values, py::buffer index,
         throw std::runtime_error("index must be two-dimensional integer array.");
     }
 
-    auto values_ptr = static_cast<float *>(info_values.ptr);
+    auto values_ptr = static_cast<float *>(info_values.buf);
     auto values_stride = info_values.strides[0] / info_values.itemsize;
 
-    auto index_ptr = static_cast<int32_t *>(info_index.ptr);
+    auto index_ptr = static_cast<int32_t *>(info_index.buf);
     auto index_offset_0 = info_index.strides[0] / info_index.itemsize;
     auto index_stride = info_index.strides[1] / info_index.itemsize;
 
     {
         // release GIL once we acquire buffer pointer
-        py::gil_scoped_release release;
         int i = 0;
         int current_index = 0;
 
@@ -402,7 +426,7 @@ void fill_bond_incidence_list_sparse(py::buffer values, py::buffer index,
                     index_ptr[index_offset_0 + current_index * index_stride] =
                         2 * bond2->getIdx() + (bond2->getBeginAtomIdx() == atom->getIdx());
 
-                    values_ptr[current_index] = value;
+                    values_ptr[current_index * values_stride] = value;
                     current_index += 1;
                 }
             };
@@ -413,9 +437,9 @@ void fill_bond_incidence_list_sparse(py::buffer values, py::buffer index,
     }
 }
 
-void fill_atom_bond_list_segment(py::buffer scopes, py::buffer index, const RDKit::ROMol &mol) {
-    auto info_scopes = scopes.request(true);
-    auto info_index = index.request(true);
+void fill_atom_bond_list_segment(PyObject* scopes, PyObject* index, const RDKit::ROMol &mol) {
+    auto info_scopes = get_buffer(scopes, PyBUF_WRITABLE);
+    auto info_index = get_buffer(index, PyBUF_WRITABLE);
 
     if (!check_format_i32(info_scopes.format) || info_scopes.ndim != 2) {
         throw std::runtime_error("scopes must be two-dimensional integer array.");
@@ -433,16 +457,14 @@ void fill_atom_bond_list_segment(py::buffer scopes, py::buffer index, const RDKi
         throw std::runtime_error("Index must be of length twice number of bonds.");
     }
 
-    auto index_ptr = static_cast<int32_t *>(info_index.ptr);
+    auto index_ptr = static_cast<int32_t *>(info_index.buf);
     auto index_stride = info_index.strides[0] / info_index.itemsize;
 
-    auto scopes_ptr = static_cast<int32_t *>(info_scopes.ptr);
+    auto scopes_ptr = static_cast<int32_t *>(info_scopes.buf);
     auto scopes_stride = info_scopes.strides[0] / info_scopes.itemsize;
     auto scopes_offset_1 = info_scopes.strides[1] / info_scopes.itemsize;
 
     {
-        py::gil_scoped_release release;
-
         int offset = 0;
         int i = 0;
         int current_index = 0;
@@ -469,10 +491,9 @@ void fill_atom_bond_list_segment(py::buffer scopes, py::buffer index, const RDKi
     }
 }
 
-void fill_bond_incidence_list_segment(py::buffer scopes, py::buffer index,
-                                      const RDKit::ROMol &mol) {
-    auto info_scopes = scopes.request(true);
-    auto info_index = index.request(true);
+void fill_bond_incidence_list_segment(PyObject* scopes, PyObject* index, const RDKit::ROMol &mol) {
+    auto info_scopes = get_buffer(scopes, PyBUF_WRITABLE);
+    auto info_index = get_buffer(index, PyBUF_WRITABLE);
 
     if (!check_format_i32(info_scopes.format) || info_scopes.ndim != 2) {
         throw std::runtime_error("scopes must be two-dimensional integer array.");
@@ -486,16 +507,16 @@ void fill_bond_incidence_list_segment(py::buffer scopes, py::buffer index,
         throw std::runtime_error("scopes must be of length 2 * number of bonds.");
     }
 
-    auto index_ptr = static_cast<int32_t *>(info_index.ptr);
+    auto index_ptr = static_cast<int32_t *>(info_index.buf);
     auto index_stride = info_index.strides[0] / info_index.itemsize;
 
-    auto scopes_ptr = static_cast<int32_t *>(info_scopes.ptr);
+    auto scopes_ptr = static_cast<int32_t *>(info_scopes.buf);
     auto scopes_stride = info_scopes.strides[0] / info_scopes.itemsize;
     auto scopes_offset_1 = info_scopes.strides[1] / info_scopes.itemsize;
 
     {
         // release GIL once we acquire buffer pointer
-        py::gil_scoped_release release;
+
         int i = 0;
         int current_index = 0;
         int offset = 0;
@@ -540,49 +561,46 @@ void fill_bond_incidence_list_segment(py::buffer scopes, py::buffer index,
 
 } // namespace
 
-namespace genric {
-
-void register_molecule_representation(py::module &m) {
-    m.doc() = "Helpers for computing molecule representations";
-    m.def("fill_atom_bond_list", &fill_atom_bond_list,
+BOOST_PYTHON_MODULE(molecule_representation) {
+    py::scope().attr("__doc__") = "Helpers for computing molecule representations";
+    py::def("fill_atom_bond_list", &fill_atom_bond_list,
           "Fills the given buffer with atom-bond incidence information.");
 
-    m.def("fill_bond_incidence_list", &fill_bond_incidence_list,
+    py::def("fill_bond_incidence_list", &fill_bond_incidence_list,
           "Fills the given buffer with bond-bond incidence information.");
 
-    m.def("fill_atom_features", &fill_atom_features,
+    py::def("fill_atom_features", &fill_atom_features,
           "Fills the given buffer with atom features. \n\n"
           "The buffer must be a C-contiguous two-dimensional float buffer with number of rows at "
           "least the number of molecules mol, and number of columns at least "
           "`AtomFeatureDimension`.");
 
-    m.def(
+    py::def(
         "fill_bond_features", &fill_bond_features,
         "Fills the given buffer with bond features. \n\n"
         "The buffer must be a C-contiguous two-dimensional float buffer with number of columns at "
         "least `AtomFeatureDimension + BondFeatureDimension`, and number of rows at least "
         "twice the number of bonds plus one.");
 
-    m.def("fill_atom_bond_list_sparse", &fill_atom_bond_list_sparse, py::arg("values"),
-          py::arg("index"), py::arg("mol"),
+    py::def("fill_atom_bond_list_sparse", &fill_atom_bond_list_sparse, (py::arg("values"),
+          py::arg("index"), py::arg("mol")),
           "Fills the given values and index buffers with the atom-bond incidence information."
           "The two buffers represent a sparse weighted adjacency matrix in COO format.");
 
-    m.def("fill_bond_incidence_list_sparse", &fill_bond_incidence_list_sparse, py::arg("values"),
-          py::arg("index"), py::arg("mol"),
+    py::def("fill_bond_incidence_list_sparse", &fill_bond_incidence_list_sparse, (py::arg("values"),
+          py::arg("index"), py::arg("mol")),
           "Fills the given values and index buffers with the bond-bond incidence information."
           "The two buffers represent a sparse weighted adjacency matrix in COO format.");
 
-    m.def("get_edge_incidence_size", &get_edge_incidence_size,
+    py::def("get_edge_incidence_size", &get_edge_incidence_size,
           "Computes the number of non-zero entries in the bond incidence adjacency graph.");
 
-    m.attr("AtomFeatureDimension") = py::int_(AtomFeatureDimension);
-    m.attr("BondFeatureDimension") = py::int_(BondFeatureDimension);
+    py::scope().attr("AtomFeatureDimension") = AtomFeatureDimension;
+    py::scope().attr("BondFeatureDimension") = BondFeatureDimension;
 
-    m.def("fill_atom_bond_list_segment", &fill_atom_bond_list_segment, py::arg("scopes"),
+    py::def("fill_atom_bond_list_segment", &fill_atom_bond_list_segment, py::arg("scopes"),
           py::arg("index"), py::arg("mol"));
 
-    m.def("fill_bond_incidence_list_segment", &fill_bond_incidence_list_segment, py::arg("scopes"),
+    py::def("fill_bond_incidence_list_segment", &fill_bond_incidence_list_segment, py::arg("scopes"),
           py::arg("index"), py::arg("mol"));
 }
-} // namespace genric

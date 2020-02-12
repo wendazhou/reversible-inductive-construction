@@ -1,6 +1,8 @@
 *.pyc
 .pytest_cache
 
+*.cpython-*
+
 /data/*
 !/data/laman
 !/data/zinc
