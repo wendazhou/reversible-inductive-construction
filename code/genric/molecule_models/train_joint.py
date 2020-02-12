@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import typing
+import datetime
 
 import json
 import os
@@ -219,7 +220,7 @@ def train(parameters=None, distributed_config=None):
 
     if _train_utils.is_leader():
         hooks = [
-            _train_harness.LogLossTimeHook(parameters.get('batch_size'), parameters.get('log_freq', 10), summary_writer),
+            _train_harness.LogLossTimeHook(parameters.get('batch_size'), parameters.get('log_frequency', 10), summary_writer),
             _train_harness.PrintAccuracyHook(summary, summary_writer, task),
             _train_harness.LogModelWeightsHook(model, summary_writer),
             _train_harness.LogOptimizerHook(optimizer, summary_writer)]
@@ -235,12 +236,24 @@ def train(parameters=None, distributed_config=None):
         if hasattr(sampler, 'set_epoch'):
             sampler.set_epoch(ep)
 
+        if _train_utils.is_leader():
+            print('Starting epoch {0}'.format(ep + 1))
+            start_time = datetime.datetime.utcnow()
+
+        harness.train_epoch(train_loader)
+
+        if _train_utils.is_leader():
+            end_time = datetime.datetime.utcnow()
+            print('Done with epoch {0}. Took {1}'.format(ep + 1, end_time - start_time))
+
         if task == 'train':
             for scheduler in schedulers:
                 scheduler.step()
 
-        harness.train_epoch(train_loader)
-        save_model_fn(ep+1, 0)
+
+        #save_model_fn(ep+1, 0)
+
+    save_model_fn(ep, 0)
 
 
 def main():

@@ -63,10 +63,13 @@ class SingleDeviceDistributedParallel(torch.nn.parallel.distributed.DistributedD
         super(SingleDeviceDistributedParallel, self).__init__(module, [device_id])
 
     def forward(self, *inputs, **kwargs):
-        self._sync_params()
+        if self.require_forward_param_sync:
+            self._sync_params()
+
         output = self.module(*inputs, **kwargs)
 
-        if torch.is_grad_enabled():
+        if torch.is_grad_enabled() and self.require_backward_grad_sync:
+            self.require_forward_param_sync = True
             self.reducer.prepare_for_backward([])
 
         return output

@@ -152,9 +152,11 @@ class LogLossTimeHook:
         elapsed_iter = global_step - self._last_tic_iter
 
         mean_time = elapsed_time / elapsed_iter / self.batch_size * 1e3
+        speed = elapsed_iter / elapsed_time * self.batch_size
+
         _log_if_rank_zero(
-            "Mean time: {0:.2f} ms / mol, Epoch: {1}, It: {2}, Loss: {3:.3f}".format(
-                mean_time, info['epoch'], info['it'], loss))
+            "Speed: {0:.2f} mol / s, Epoch: {1}, It: {2}, Loss: {3:.3f}".format(
+                speed, info['epoch'], info['it'], loss))
 
         if self.summary_writer is not None:
             self.summary_writer.add_scalar('loss', loss, global_step)

@@ -1,3 +1,4 @@
+import io
 import numpy as np
 from functools import partial
 
@@ -30,6 +31,9 @@ class CachedCorruptionDataset(torch.utils.data.Dataset):
 
     def set_epoch(self, idx):
         if self.epoch == idx:
+            return
+
+        if len(self.path) == 1 and idx > 0:
             return
 
         self.epoch = idx
@@ -100,6 +104,9 @@ def main():
     import bz2
     import tqdm
     import multiprocessing
+
+    from genric.Chem import disable_log
+    disable_log('rdApp.*')
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-o', '--output', type=str, default='cached_data.npz')

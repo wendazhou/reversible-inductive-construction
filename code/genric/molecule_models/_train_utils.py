@@ -190,7 +190,7 @@ def parse_arguments():
     parser.add_argument('--lr', default=2e-3, type=float)
     parser.add_argument('--epochs', default=50, type=int)
     parser.add_argument('--data-dir', default='zinc')
-    parser.add_argument('--log-frequency', default=10)
+    parser.add_argument('--log-frequency', default=10, type=int)
     parser.add_argument('--num-workers', default=8, type=int)
     parser.add_argument('--no-cache', action='store_true')
     parser.add_argument('--canonical', action='store_true', dest='canonical')
